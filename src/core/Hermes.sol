@@ -5,13 +5,14 @@ pragma solidity 0.8.15;
 import {ERC20} from "solmate/tokens/ERC20.sol";
 
 /// Import Interfaces
-import {IUniswapV2Router} from "src/interfaces/IUniswapV2Router.sol";
+import {SingleSwap, FundManagement, IVault} from "src/interfaces/IVault.sol";
 
 contract Hermes {
     /* ========== ERRORS =========== */
 
     error Hermes_InvalidParams();
     error Hermes_OnlyOwner();
+    error Hermes_IllegalToken();
 
     /* ========== EVENTS =========== */
 
@@ -30,7 +31,8 @@ contract Hermes {
     address internal owner;
 
     /// External Contracts
-    IUniswapV2Router internal router;
+    IVault internal vault;
+    address internal poolId;
 
     /// User State
     mapping(address => address) public preferredToken;
@@ -39,15 +41,28 @@ contract Hermes {
     uint256 feesCollected;
 
     /// Config Variables
+    mapping(address => bool) public whitelistedTokens;
     uint16 internal feeRate;
+    uint16 internal slippage;
     uint16 internal constant PRECISION_LEVEL = 10000;
 
-    constructor(address owner_, address router_) {
-        if (owner_ == address(0) || router_ == address(0))
+    constructor(address owner_, address vault_, bytes32 poolId_) {
+        if (owner_ == address(0) || vault_ == address(0))
             revert Hermes_InvalidParams();
 
         owner = owner_;
-        router = IUniswapV2Router(router_);
+        vault = IVault(vault_);
+        poolId = poolId_;
+
+        (address[] memory tokens, , ) = vault.getPoolTokens(poolId_);
+        uint8 tokensLength = tokens.length;
+        for (uint8 i = 0; i < tokensLength; ) {
+            whitelistedTokens[tokens[i]] = true;
+
+            unchecked {
+                i++;
+            }
+        }
     }
 
     /* ========== MODIFIERS =========== */
@@ -64,6 +79,8 @@ contract Hermes {
         address token_,
         uint256 amount_
     ) external returns (bool) {
+        if (!whitelistedTokens[token_]) revert Hermes_IllegalToken();
+
         address recipientPreferredToken = preferredToken[recipient_];
 
         uint256 feeAmount = (feeRate * amount_) / PRECISION_LEVEL;
@@ -75,14 +92,23 @@ contract Hermes {
             return true;
         }
 
-        /// TODO: Build path
-        uint256[] memory resultingAmounts = router.swapExactTokensForTokens(
+        SingleSwap swapData = SingleSwap({
+            poolId,
+            SwapKind.GIVEN_IN,
+            token_,
+            recipientPreferredToken,
             amount,
-            amountOutMin,
-            path,
+            bytes(0)
+        });
+
+        FundManagement fundData = FundManagement({
+            msg.sender,
+            false,
             recipient_,
-            block.timestamp + 10 * 60
-        );
+            false
+        });
+
+        vault.swap(swapData, fundData, minAmountOut, block.timestamp + 10 * 60);
 
         emit Paid(
             msg.sender,
@@ -93,5 +119,10 @@ contract Hermes {
             resultingAmounts[1]
         );
         return true;
+    }
+
+    function setPreferredToken(address token_) external {
+        if (!whitelistedTokens[token_]) revert Hermes_IllegalToken();
+        preferredToken[msg.sender] = token_;
     }
 }
